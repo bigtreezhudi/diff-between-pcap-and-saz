@@ -8,7 +8,7 @@ import tempfile
 import shutil
 from xml.dom.minidom import parse, parseString
 from scapy.utils import PcapWriter
-from scapy.all import *
+from scapy.all import PcapReader, wrpcap, Packet, NoPayload
 import glob
 from optparse import OptionParser
 import logging
@@ -19,13 +19,12 @@ class ComparePcapAndSaz(object):
     """
     def __init__(self):
         self.opts2args = self.parser_option()
-        # print self.opts2args
         self.extract_saz()
 
     def parser_option(self):
         """
         解析主程序的输入参数
-        :return:dict 输入参数的键值对
+        @return dict 输入参数
         """
         parser = OptionParser()
         parser.add_option("--pcap", dest="input_pcap", type="string", help="path to pcap file")
@@ -51,7 +50,6 @@ class ComparePcapAndSaz(object):
     def extract_saz(self):
         """
         将saz文件解压
-        :return:
         """
         # 如果输入是saz文件则解压
         if os.path.isfile(self.opts2args.input_saz):
@@ -90,9 +88,71 @@ class ComparePcapAndSaz(object):
         logging.info("fiddler的raw文件准备完毕")
 
     def remove_tmpdir(self):
+        """
+        删除解压saz文件时创建的/tmp下的临时目录
+        """
         if self.opts2args.tmpdir:
             try:
                 shutil.rmtree(self.opts2args.tmpdir)
                 logging.info("删除tmpdir %s", self.opts2args.tmpdir)
             except:
                 logging.info("删除tmpdir %s 失败", self.opts2args.tmpdir)
+
+    def parse_saz(self):
+        """
+        解析saz raw中的文件
+        """
+        self.saz_quaternions_list = []
+        if os.path.isdir(self.opts2args.fiddler_raw_dir):
+            m_file_list = glob.glob("%s/%s" % (self.opts2args.fiddler_raw_dir, "*_m.xml"))
+            m_file_list.sort()
+            for xml_file in m_file_list:
+                dom = parse(xml_file)
+                m = re.match(r"^(?P<fileid>\d+)_m\.xml",os.path.basename(xml_file))
+                if m:
+                    fileid = m.group("fileid")
+                else:
+                    logging.info("failed to get fiddler id tag")
+                    sys.exit(-1)
+
+                xmlTags = dom.getElementsByTagName('SessionFlag')
+                src, sport, dst, dport = None, None, None, 8888
+                for xmlTag in xmlTags:
+                    xmlTag = xmlTag.toxml()
+                    m = re.match(
+                        r"\<SessionFlag N=\x22x-(?:client(?:ip\x22 V=\x22[^\x22]*?(?P<clientip>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})|port\x22 V=\x22(?P<sport>\d+))|hostip\x22 V=\x22[^\x22]*?(?P<hostip>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}))\x22",
+                        xmlTag)
+                    if m and m.group("sport"):
+                        sport = int(m.group("sport"))
+                    elif m and m.group("clientip"):
+                        src = m.group("clientip")
+                    elif m and m.group("hostip"):
+                        dst = m.group("hostip")
+                self.saz_quaternions_list.append([fileid, src, sport, dst, dport])
+                # TODO: 对saz文件的深入解析
+        else:
+            logging.info("fiddler raw文件夹 %s 不存在", self.opts2args.fiddler_raw_dir)
+            sys.exit(-1)
+
+    def parse_pcap(self):
+        """
+        解析pcap文件
+        """
+        logging.info("开始解析pcap文件")
+        with PcapReader(self.opts2args.input_pcap) as pcap_reader:
+           for packet in pcap_reader:
+               try:
+                   src = packet['IP'].fields['src']
+                   dst = packet['IP'].fields['dst']
+               except:
+                   continue
+               try:
+                   sport = packet['TCP'].fields['sport']
+                   dport = packet['TCP'].fields['dport']
+               except:
+                   continue
+               logging.info("source %s:%s, destination %s:%s",src, sport, dst, dport)
+               # TODO: 对pcap文件的深入解析
+        logging.info("pcap文件解析完毕")
+
+
